@@ -1,0 +1,10 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<feed xmlns="http://www.w3.org/2005/Atom" xml:lang="en">
+  <id>https://github.com/florida-court-opinions</id>
+  <title>Florida Appellate Court Opinions</title>
+  <updated>2026-02-17T17:13:05.174772+00:00</updated>
+  <link href="https://flcourts.gov" rel="alternate"/>
+  <link href="feed.xml" rel="self"/>
+  <generator>Florida Court Opinion Scraper</generator>
+  <subtitle>Daily summaries of new opinions from Florida's Supreme Court and District Courts of Appeal</subtitle>
+</feed>
