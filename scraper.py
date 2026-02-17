@@ -1,7 +1,11 @@
 """
 Florida Court Opinion Scraper
 
-Scrapes opinions from all 7 Florida appellate courts:
+Scrapes opinions from all 7 Florida appellate courts using Playwright
+(headless browser) since the court websites are JavaScript SPAs that
+render content client-side.
+
+Courts:
 - Supreme Court of Florida
 - 1st through 6th District Courts of Appeal
 """
@@ -10,18 +14,17 @@ import io
 import logging
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional
-from urllib.parse import urljoin, urlencode
+from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
 from PyPDF2 import PdfReader
+from playwright.sync_api import sync_playwright, Page, TimeoutError as PlaywrightTimeout
 
-from config import COURTS, ARCHIVE_PARAMS, USER_AGENT, LOOKBACK_DAYS
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+from config import COURTS, USER_AGENT, LOOKBACK_DAYS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -35,7 +38,7 @@ class Opinion:
     court_id: str
     court_name: str
     date: datetime
-    opinion_type: str = ""  # e.g., "Written Opinion", "PCA", etc.
+    opinion_type: str = ""
     pdf_url: str = ""
     page_url: str = ""
     text_content: str = ""
@@ -48,130 +51,96 @@ class Opinion:
 
 
 class FloridaCourtScraper:
-    """Scrapes opinions from Florida appellate courts."""
+    """Scrapes opinions from Florida appellate courts using Playwright."""
 
     def __init__(self):
-        self.session = requests.Session()
-        # Use a realistic browser user-agent
-        self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1",
-        })
-        # Add retry logic for transient failures
-        retry_strategy = Retry(
-            total=3,
-            backoff_factor=1,
-            status_forcelist=[429, 500, 502, 503, 504],
-        )
-        adapter = HTTPAdapter(max_retries=retry_strategy)
-        self.session.mount("https://", adapter)
-        self.session.mount("http://", adapter)
         self.cutoff_date = datetime.now() - timedelta(days=LOOKBACK_DAYS)
+        # requests session for PDF downloads (doesn't need JS rendering)
+        self.session = requests.Session()
+        self.session.headers.update({"User-Agent": USER_AGENT})
 
     def scrape_all_courts(self) -> list[Opinion]:
         """Scrape opinions from all configured courts."""
         all_opinions = []
 
-        for court_id, court_config in COURTS.items():
-            try:
-                logger.info(f"Scraping {court_config['name']}...")
-                opinions = self._scrape_court(court_id, court_config)
-                all_opinions.extend(opinions)
-                logger.info(f"  Found {len(opinions)} opinions from {court_config['short_name']}")
-                time.sleep(2)  # Be respectful with request timing
-            except Exception as e:
-                logger.error(f"  Error scraping {court_config['name']}: {e}")
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            )
+            page = context.new_page()
+
+            for court_id, court_config in COURTS.items():
+                try:
+                    logger.info(f"Scraping {court_config['name']}...")
+                    opinions = self._scrape_court(page, court_id, court_config)
+                    all_opinions.extend(opinions)
+                    logger.info(f"  Found {len(opinions)} opinions from {court_config['short_name']}")
+                    time.sleep(1)
+                except Exception as e:
+                    logger.error(f"  Error scraping {court_config['name']}: {e}")
+
+            browser.close()
 
         logger.info(f"Total opinions scraped: {len(all_opinions)}")
         return all_opinions
 
-    def _scrape_court(self, court_id: str, config: dict) -> list[Opinion]:
-        """Scrape opinions from a single court, trying multiple strategies."""
-        opinions = []
+    def _scrape_court(self, page: Page, court_id: str, config: dict) -> list[Opinion]:
+        """Scrape opinions from a single court, trying multiple page URLs."""
+        # Try URLs in priority order
+        urls_to_try = []
+        if "recent_url" in config:
+            urls_to_try.append(("recent", config["recent_url"]))
+        if "archive_url" in config:
+            urls_to_try.append(("archive", config["archive_url"]))
+        if "opinions_url" in config:
+            urls_to_try.append(("main", config["opinions_url"]))
 
-        # Strategy 1: Try the "Most Recent" page
+        for label, url in urls_to_try:
+            try:
+                opinions = self._scrape_page_with_playwright(page, url, court_id, config)
+                if opinions:
+                    logger.info(f"  Got {len(opinions)} opinions from {label} page")
+                    return opinions
+            except Exception as e:
+                logger.warning(f"  {label} page failed for {court_id}: {e}")
+
+        return []
+
+    def _scrape_page_with_playwright(self, page: Page, url: str, court_id: str, config: dict) -> list[Opinion]:
+        """Navigate to a page, wait for JS rendering, then parse the content."""
+        logger.info(f"  Loading: {url}")
+
+        # Navigate and wait for the page to be fully loaded
+        page.goto(url, wait_until="networkidle", timeout=30000)
+
+        # Wait for content to appear — look for common indicators that opinions loaded
+        # Try waiting for tables, links with case numbers, or any substantial content
         try:
-            recent_opinions = self._scrape_recent_page(court_id, config)
-            if recent_opinions:
-                opinions.extend(recent_opinions)
-                return opinions
-        except Exception as e:
-            logger.debug(f"  Recent page failed for {court_id}: {e}")
+            page.wait_for_selector(
+                "table, a[href*='download'], a[href*='.pdf'], [class*='opinion'], [class*='case']",
+                timeout=10000,
+            )
+        except PlaywrightTimeout:
+            # Content might be structured differently; continue anyway
+            logger.debug(f"  No expected selectors found, parsing what we have")
 
-        # Strategy 2: Try the archive page with date filtering
-        try:
-            archive_opinions = self._scrape_archive_page(court_id, config)
-            if archive_opinions:
-                opinions.extend(archive_opinions)
-                return opinions
-        except Exception as e:
-            logger.debug(f"  Archive page failed for {court_id}: {e}")
+        # Give an extra moment for any lazy-loaded content
+        page.wait_for_timeout(2000)
 
-        # Strategy 3: Try the main opinions page
-        try:
-            main_opinions = self._scrape_main_opinions_page(court_id, config)
-            if main_opinions:
-                opinions.extend(main_opinions)
-        except Exception as e:
-            logger.debug(f"  Main opinions page failed for {court_id}: {e}")
+        # Get the fully-rendered HTML
+        html = page.content()
+        logger.info(f"  Rendered page size: {len(html)} chars")
 
-        return opinions
-
-    def _scrape_recent_page(self, court_id: str, config: dict) -> list[Opinion]:
-        """Scrape the Most Recent Opinions page."""
-        url = config.get("recent_url")
-        if not url:
-            return []
-
-        response = self.session.get(url, timeout=30)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, "lxml")
-
-        return self._parse_opinion_page(soup, court_id, config, url)
-
-    def _scrape_archive_page(self, court_id: str, config: dict) -> list[Opinion]:
-        """Scrape the archive page with parameters."""
-        url = config.get("archive_url")
-        if not url:
-            return []
-
-        params = ARCHIVE_PARAMS.copy()
-        # Add date filter to only get recent opinions
-        params["startdate"] = self.cutoff_date.strftime("%m/%d/%Y")
-        params["enddate"] = datetime.now().strftime("%m/%d/%Y")
-
-        response = self.session.get(url, params=params, timeout=30)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, "lxml")
-
-        return self._parse_opinion_page(soup, court_id, config, url)
-
-    def _scrape_main_opinions_page(self, court_id: str, config: dict) -> list[Opinion]:
-        """Scrape the main opinions landing page."""
-        url = config.get("opinions_url")
-        if not url:
-            return []
-
-        response = self.session.get(url, timeout=30)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, "lxml")
-
+        # Parse the rendered HTML
+        soup = BeautifulSoup(html, "lxml")
         return self._parse_opinion_page(soup, court_id, config, url)
 
     def _parse_opinion_page(self, soup: BeautifulSoup, court_id: str, config: dict, page_url: str) -> list[Opinion]:
-        """
-        Parse an opinion listing page. Florida courts use several HTML patterns:
-        1. Table-based listings (common in archive pages)
-        2. Div-based card/list layouts (common in recent opinions)
-        3. Embedded content areas with structured data
-        """
+        """Parse a rendered opinion page using multiple strategies."""
         opinions = []
 
-        # --- Pattern 1: Table rows ---
+        # --- Strategy 1: Table rows ---
         for table in soup.find_all("table"):
             rows = table.find_all("tr")
             headers = []
@@ -182,28 +151,28 @@ class FloridaCourtScraper:
                     continue
                 if not cells or len(cells) < 2:
                     continue
-
                 opinion = self._parse_table_row(cells, headers, court_id, config, page_url)
                 if opinion and self._is_recent(opinion):
                     opinions.append(opinion)
 
         if opinions:
-            return opinions
+            logger.info(f"  Parsed {len(opinions)} opinions from tables")
+            return self._dedupe(opinions)
 
-        # --- Pattern 2: Links to PDFs with case number patterns ---
-        pdf_links = soup.find_all("a", href=re.compile(r"(\.pdf|/download/|opinion)", re.I))
+        # --- Strategy 2: Links to PDFs / downloads ---
+        pdf_links = soup.find_all("a", href=re.compile(r"(\.pdf|/download/|/content/download)", re.I))
         for link in pdf_links:
             opinion = self._parse_pdf_link(link, court_id, config, page_url)
             if opinion and self._is_recent(opinion):
                 opinions.append(opinion)
 
         if opinions:
-            return opinions
+            logger.info(f"  Parsed {len(opinions)} opinions from PDF links")
+            return self._dedupe(opinions)
 
-        # --- Pattern 3: Structured div containers ---
-        # Look for common container patterns
-        containers = soup.find_all(["div", "article", "section"], class_=re.compile(
-            r"(opinion|case|result|item|entry|row)", re.I
+        # --- Strategy 3: Structured containers ---
+        containers = soup.find_all(["div", "article", "section", "li"], class_=re.compile(
+            r"(opinion|case|result|item|entry|row|record|search)", re.I
         ))
         for container in containers:
             opinion = self._parse_container(container, court_id, config, page_url)
@@ -211,27 +180,37 @@ class FloridaCourtScraper:
                 opinions.append(opinion)
 
         if opinions:
-            return opinions
+            logger.info(f"  Parsed {len(opinions)} opinions from containers")
+            return self._dedupe(opinions)
 
-        # --- Pattern 4: Fallback - look for any links that look like opinions ---
+        # --- Strategy 4: Any links with case number patterns ---
         all_links = soup.find_all("a", href=True)
         for link in all_links:
-            href = link.get("href", "")
             text = link.get_text(strip=True)
-            # Match Florida case number patterns
-            if re.search(r"\d{4}-\d{2,5}", text) or re.search(r"SC\d{4}-\d+", text):
+            if re.search(r"(SC\d{4}-\d+|\d{4}-\d{2,5})", text):
                 opinion = self._parse_case_link(link, court_id, config, page_url)
                 if opinion and self._is_recent(opinion):
                     opinions.append(opinion)
 
-        return opinions
+        if opinions:
+            logger.info(f"  Parsed {len(opinions)} opinions from case links")
+            return self._dedupe(opinions)
+
+        # --- Strategy 5: Broad text search for case numbers ---
+        all_text = soup.get_text()
+        case_matches = re.findall(r"(SC\d{4}-\d+|\d{4}-\d{2,5})", all_text)
+        if case_matches:
+            logger.info(f"  Found {len(set(case_matches))} case numbers in page text but couldn't extract structured data")
+        else:
+            logger.warning(f"  No case numbers found in rendered page at all")
+
+        return []
 
     def _parse_table_row(self, cells, headers, court_id, config, page_url) -> Optional[Opinion]:
         """Parse a table row into an Opinion."""
         try:
             cell_texts = [c.get_text(strip=True) for c in cells]
 
-            # Try to identify columns by headers
             case_number = ""
             case_name = ""
             date_str = ""
@@ -242,9 +221,9 @@ class FloridaCourtScraper:
             if headers:
                 col_map = {}
                 for i, h in enumerate(headers):
-                    if "case" in h and "number" in h or h == "case no":
+                    if ("case" in h and "number" in h) or h == "case no" or h == "case no.":
                         col_map["case_number"] = i
-                    elif "case" in h and "name" in h or "style" in h or "caption" in h or "title" in h:
+                    elif ("case" in h and "name" in h) or "style" in h or "caption" in h or "title" in h:
                         col_map["case_name"] = i
                     elif "date" in h or "disposition" in h or "filed" in h or "released" in h:
                         col_map["date"] = i
@@ -253,13 +232,12 @@ class FloridaCourtScraper:
                     elif "tribunal" in h or "lower" in h:
                         col_map["lower_tribunal"] = i
 
-                case_number = cell_texts[col_map["case_number"]] if "case_number" in col_map else ""
-                case_name = cell_texts[col_map["case_name"]] if "case_name" in col_map else ""
-                date_str = cell_texts[col_map["date"]] if "date" in col_map else ""
-                opinion_type = cell_texts[col_map["opinion_type"]] if "opinion_type" in col_map else ""
-                lower_tribunal = cell_texts[col_map["lower_tribunal"]] if "lower_tribunal" in col_map else ""
+                case_number = cell_texts[col_map["case_number"]] if "case_number" in col_map and col_map["case_number"] < len(cell_texts) else ""
+                case_name = cell_texts[col_map["case_name"]] if "case_name" in col_map and col_map["case_name"] < len(cell_texts) else ""
+                date_str = cell_texts[col_map["date"]] if "date" in col_map and col_map["date"] < len(cell_texts) else ""
+                opinion_type = cell_texts[col_map["opinion_type"]] if "opinion_type" in col_map and col_map["opinion_type"] < len(cell_texts) else ""
+                lower_tribunal = cell_texts[col_map["lower_tribunal"]] if "lower_tribunal" in col_map and col_map["lower_tribunal"] < len(cell_texts) else ""
             else:
-                # Guess column positions: typically case_number, case_name, date...
                 if len(cell_texts) >= 3:
                     case_number = cell_texts[0]
                     case_name = cell_texts[1]
@@ -268,22 +246,19 @@ class FloridaCourtScraper:
 
             # Find PDF link in the row
             for cell in cells:
-                link = cell.find("a", href=True)
-                if link:
+                for link in cell.find_all("a", href=True):
                     href = link.get("href", "")
                     if ".pdf" in href.lower() or "download" in href.lower():
                         pdf_url = urljoin(config["base_url"], href)
                     if not case_name:
                         case_name = link.get_text(strip=True)
                     if not case_number:
-                        # Try to extract case number from link text
                         link_text = link.get_text(strip=True)
                         match = re.search(r"(SC\d{4}-\d+|\d{4}-\d{2,5})", link_text)
                         if match:
                             case_number = match.group(1)
 
             if not case_number:
-                # Try to find case number in any cell text
                 for text in cell_texts:
                     match = re.search(r"(SC\d{4}-\d+|\d{4}-\d{2,5})", text)
                     if match:
@@ -293,9 +268,7 @@ class FloridaCourtScraper:
             if not case_number:
                 return None
 
-            date = self._parse_date(date_str)
-            if not date:
-                date = datetime.now()  # Default to now if no date found
+            date = self._parse_date(date_str) or datetime.now()
 
             return Opinion(
                 case_number=case_number,
@@ -319,7 +292,6 @@ class FloridaCourtScraper:
             text = link.get_text(strip=True)
             pdf_url = urljoin(config["base_url"], href)
 
-            # Extract case number from URL or text
             case_number = ""
             for source in [href, text]:
                 match = re.search(r"(SC\d{4}-\d+|\d{4}-\d{2,5})", source)
@@ -330,22 +302,36 @@ class FloridaCourtScraper:
             if not case_number:
                 return None
 
-            # Try to find a case name from surrounding context
+            # Get case name and date from surrounding context
             parent = link.parent
             case_name = text if text and text != case_number else ""
-            if not case_name and parent:
-                case_name = parent.get_text(strip=True)[:200]
 
-            # Try to find a date from surrounding context
+            # Walk up to find more context
+            context_el = parent
+            for _ in range(3):
+                if context_el is None:
+                    break
+                context_text = context_el.get_text(strip=True)
+                if not case_name and len(context_text) > len(case_number) + 5:
+                    case_name = re.sub(r"\s+", " ", context_text)[:300]
+                context_el = context_el.parent
+
             date = datetime.now()
             if parent:
-                parent_text = parent.get_text()
-                date_match = re.search(
-                    r"(\d{1,2}/\d{1,2}/\d{2,4}|\w+ \d{1,2},? \d{4}|\d{4}-\d{2}-\d{2})",
-                    parent_text
-                )
-                if date_match:
-                    date = self._parse_date(date_match.group(1)) or date
+                # Search upward for a date
+                for ancestor in [parent] + list(parent.parents)[:5]:
+                    if ancestor is None or ancestor.name is None:
+                        break
+                    ancestor_text = ancestor.get_text()
+                    date_match = re.search(
+                        r"(\d{1,2}/\d{1,2}/\d{2,4}|\w+ \d{1,2},? \d{4}|\d{4}-\d{2}-\d{2})",
+                        ancestor_text,
+                    )
+                    if date_match:
+                        parsed = self._parse_date(date_match.group(1))
+                        if parsed:
+                            date = parsed
+                            break
 
             return Opinion(
                 case_number=case_number,
@@ -364,20 +350,16 @@ class FloridaCourtScraper:
         """Parse a structured div container into an Opinion."""
         try:
             text = container.get_text(strip=True)
-
-            # Find case number
             case_match = re.search(r"(SC\d{4}-\d+|\d{4}-\d{2,5})", text)
             if not case_match:
                 return None
             case_number = case_match.group(1)
 
-            # Find PDF link
             pdf_url = ""
             link = container.find("a", href=re.compile(r"(\.pdf|download)", re.I))
             if link:
                 pdf_url = urljoin(config["base_url"], link.get("href", ""))
 
-            # Find date
             date = datetime.now()
             date_match = re.search(
                 r"(\d{1,2}/\d{1,2}/\d{2,4}|\w+ \d{1,2},? \d{4}|\d{4}-\d{2}-\d{2})", text
@@ -385,7 +367,6 @@ class FloridaCourtScraper:
             if date_match:
                 date = self._parse_date(date_match.group(1)) or date
 
-            # Case name: use the full text, cleaned up
             case_name = re.sub(r"\s+", " ", text)[:300]
 
             return Opinion(
@@ -431,18 +412,10 @@ class FloridaCourtScraper:
         """Try multiple date formats."""
         if not date_str:
             return None
-
         date_str = date_str.strip()
         formats = [
-            "%m/%d/%Y",
-            "%m/%d/%y",
-            "%B %d, %Y",
-            "%B %d %Y",
-            "%b %d, %Y",
-            "%b %d %Y",
-            "%Y-%m-%d",
-            "%d-%b-%Y",
-            "%m-%d-%Y",
+            "%m/%d/%Y", "%m/%d/%y", "%B %d, %Y", "%B %d %Y",
+            "%b %d, %Y", "%b %d %Y", "%Y-%m-%d", "%d-%b-%Y", "%m-%d-%Y",
         ]
         for fmt in formats:
             try:
@@ -455,20 +428,25 @@ class FloridaCourtScraper:
         """Check if the opinion is within our lookback window."""
         return opinion.date >= self.cutoff_date
 
+    def _dedupe(self, opinions: list[Opinion]) -> list[Opinion]:
+        """Remove duplicate opinions by case number."""
+        seen = set()
+        deduped = []
+        for op in opinions:
+            if op.unique_id not in seen:
+                seen.add(op.unique_id)
+                deduped.append(op)
+        return deduped
+
     def extract_pdf_text(self, opinion: Opinion, max_pages: int = 30) -> str:
         """Download and extract text from an opinion PDF."""
         if not opinion.pdf_url:
             return ""
-
         try:
             response = self.session.get(opinion.pdf_url, timeout=60)
             response.raise_for_status()
-
             if "application/pdf" not in response.headers.get("Content-Type", ""):
-                # Might be HTML - could be a redirect or landing page
-                logger.debug(f"Non-PDF response for {opinion.case_number}")
                 return ""
-
             reader = PdfReader(io.BytesIO(response.content))
             pages_to_read = min(len(reader.pages), max_pages)
             text = ""
@@ -476,7 +454,6 @@ class FloridaCourtScraper:
                 page_text = reader.pages[i].extract_text()
                 if page_text:
                     text += page_text + "\n\n"
-
             return text.strip()
         except Exception as e:
             logger.warning(f"Error extracting PDF for {opinion.case_number}: {e}")
