@@ -33,7 +33,10 @@ jobs:
           cache: 'pip'
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
+          playwright install chromium
+          playwright install-deps chromium
 
       - name: Restore state file
         uses: actions/cache@v4
