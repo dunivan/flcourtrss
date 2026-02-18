@@ -1,87 +1,58 @@
 """
 Configuration for Florida Court Opinion Scraper
+Uses CourtListener API as the data source.
 """
 
-# Court definitions with their scraping URLs
+# CourtListener API base URL
+COURTLISTENER_API_BASE = "https://www.courtlistener.com/api/rest/v4"
+
+# CourtListener court IDs for Florida appellate courts
 COURTS = {
-    "florida_supreme_court": {
+    "fla": {
         "name": "Supreme Court of Florida",
         "short_name": "FLSC",
-        "base_url": "https://supremecourt.flcourts.gov",
-        "opinions_url": "https://supremecourt.flcourts.gov/content/download/opinion-search-results",
-        "archive_url": "https://supremecourt.flcourts.gov/Opinions/Archived-Opinions",
-        "recent_url": "https://supremecourt.flcourts.gov/case-information/opinions/most-recent-opinions",
+        "cl_id": "fla",
     },
-    "1dca": {
+    "fladistctapp1": {
         "name": "First District Court of Appeal",
         "short_name": "1st DCA",
-        "base_url": "https://1dca.flcourts.gov",
-        "opinions_url": "https://1dca.flcourts.gov/Opinions",
-        "recent_url": "https://1dca.flcourts.gov/Opinions/Most-Recent-Written-Opinions",
-        "archive_url": "https://1dca.flcourts.gov/Opinions/Opinions-Archive",
+        "cl_id": "fladistctapp1",
     },
-    "2dca": {
+    "fladistctapp2": {
         "name": "Second District Court of Appeal",
         "short_name": "2nd DCA",
-        "base_url": "https://2dca.flcourts.gov",
-        "opinions_url": "https://2dca.flcourts.gov/Opinions",
-        "recent_url": "https://2dca.flcourts.gov/Opinions/Most-Recent-Written-Opinions",
-        "archive_url": "https://2dca.flcourts.gov/Opinions/Opinions-Archive",
+        "cl_id": "fladistctapp2",
     },
-    "3dca": {
+    "fladistctapp3": {
         "name": "Third District Court of Appeal",
         "short_name": "3rd DCA",
-        "base_url": "https://3dca.flcourts.gov",
-        "opinions_url": "https://3dca.flcourts.gov/Opinions",
-        "recent_url": "https://3dca.flcourts.gov/Opinions/Most-Recent-Opinion-Release",
-        "archive_url": "https://3dca.flcourts.gov/Opinions/Opinions-Archive",
+        "cl_id": "fladistctapp3",
     },
-    "4dca": {
+    "fladistctapp4": {
         "name": "Fourth District Court of Appeal",
         "short_name": "4th DCA",
-        "base_url": "https://4dca.flcourts.gov",
-        "opinions_url": "https://4dca.flcourts.gov/Opinions",
-        "recent_url": "https://4dca.flcourts.gov/Opinions/Most-Recent-Written-Opinions",
-        "archive_url": "https://4dca.flcourts.gov/Opinions/Opinions-Archive",
+        "cl_id": "fladistctapp4",
     },
-    "5dca": {
+    "fladistctapp5": {
         "name": "Fifth District Court of Appeal",
         "short_name": "5th DCA",
-        "base_url": "https://5dca.flcourts.gov",
-        "opinions_url": "https://5dca.flcourts.gov/Opinions",
-        "recent_url": "https://5dca.flcourts.gov/Opinions/Most-Recent-Written-Opinions",
-        "archive_url": "https://5dca.flcourts.gov/Opinions/Opinions-Archive",
+        "cl_id": "fladistctapp5",
     },
-    "6dca": {
+    "fladistctapp": {
         "name": "Sixth District Court of Appeal",
         "short_name": "6th DCA",
-        "base_url": "https://6dca.flcourts.gov",
-        "opinions_url": "https://6dca.flcourts.gov/Opinions",
-        "recent_url": "https://6dca.flcourts.gov/Opinions/Most-Recent-Written-Opinions",
-        "archive_url": "https://6dca.flcourts.gov/Opinions/Opinions-Archive",
+        "cl_id": "fladistctapp",
     },
 }
-
-# Archive URL parameters (common pattern across DCA courts)
-ARCHIVE_PARAMS = {
-    "sort": "opinion/disposition_date desc, opinion/type Asc, opinion/case_number asc",
-    "view": "embed_custom",
-    "searchtype": "opinions",
-    "limit": "25",
-    "offset": "0",
-}
-
-# PDF media base URL
-PDF_MEDIA_BASE = "https://flcourts-media.flcourts.gov/content/download"
 
 # RSS feed settings
 RSS_TITLE = "Florida Appellate Court Opinions"
 RSS_DESCRIPTION = "Daily summaries of new opinions from Florida's Supreme Court and District Courts of Appeal"
-RSS_LINK = "https://flcourts.gov"
+RSS_LINK = "https://www.courtlistener.com"
 RSS_LANGUAGE = "en"
 
 # How many days back to look for opinions
 LOOKBACK_DAYS = 7
 
 # User agent for requests
-USER_AGENT = "FloridaCourtOpinionScraper/1.0 (RSS Feed Generator)"
+USER_AGENT = "FloridaCourtOpinionRSS/1.0 (GitHub Pages RSS Feed Generator)"
