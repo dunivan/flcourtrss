@@ -82,13 +82,14 @@ class CourtListenerScraper:
         cl_court_id = config["cl_id"]
         date_after = self.cutoff_date.strftime("%Y-%m-%d")
 
-        # Use the opinion clusters endpoint — each cluster is a group of opinions
-        # for a single case decision
-        url = f"{COURTLISTENER_API_BASE}/clusters/"
+        # Use the search endpoint with type=o for opinions
+        # This is the best-documented endpoint for court filtering
+        url = f"{COURTLISTENER_API_BASE}/search/"
         params = {
+            "type": "o",  # opinions
             "court": cl_court_id,
-            "date_filed__gte": date_after,
-            "order_by": "-date_filed",
+            "filed_after": date_after,
+            "order_by": "dateFiled desc",
             "format": "json",
         }
 
@@ -103,8 +104,8 @@ class CourtListenerScraper:
                 if not results:
                     break
 
-                for cluster in results:
-                    opinion = self._parse_cluster(cluster, court_id, config)
+                for result in results:
+                    opinion = self._parse_search_result(result, court_id, config)
                     if opinion:
                         opinions.append(opinion)
 
@@ -120,58 +121,68 @@ class CourtListenerScraper:
                     logger.warning("  Rate limited — waiting 30 seconds...")
                     time.sleep(30)
                     continue
+                elif e.response.status_code == 400:
+                    logger.error(f"  400 Bad Request. Response: {e.response.text[:500]}")
+                    break
                 raise
 
         return opinions
 
-    def _parse_cluster(self, cluster: dict, court_id: str, config: dict) -> Optional[Opinion]:
-        """Parse a CourtListener opinion cluster into an Opinion."""
+    def _parse_search_result(self, result: dict, court_id: str, config: dict) -> Optional[Opinion]:
+        """Parse a CourtListener search result into an Opinion."""
         try:
-            # Extract basic metadata
-            case_name = cluster.get("case_name", "") or cluster.get("case_name_short", "") or "Unknown"
-            date_filed = cluster.get("date_filed", "")
-            docket_number = cluster.get("docket_number", "") or ""
-            judges = cluster.get("judges", "") or ""
-            precedential_status = cluster.get("precedential_status", "")
+            # The search endpoint returns fields like caseName, dateFiled, docketNumber, etc.
+            case_name = (
+                result.get("caseName", "")
+                or result.get("case_name", "")
+                or result.get("caseNameShort", "")
+                or result.get("case_name_short", "")
+                or "Unknown"
+            )
+            date_filed = result.get("dateFiled", "") or result.get("date_filed", "")
+            docket_number = result.get("docketNumber", "") or result.get("docket_number", "") or ""
+            judges = result.get("judge", "") or result.get("judges", "") or ""
+            citation = result.get("citation", [])
+            status = result.get("status", "") or result.get("precedentialStatus", "") or ""
 
             # Parse date
             date = datetime.now()
             if date_filed:
                 try:
-                    date = datetime.strptime(date_filed, "%Y-%m-%d")
+                    # Could be "YYYY-MM-DD" or "YYYY-MM-DDT..."
+                    date = datetime.strptime(date_filed[:10], "%Y-%m-%d")
                 except ValueError:
                     pass
 
-            # Get the cluster URL on CourtListener
-            cluster_id = cluster.get("id", "")
-            page_url = f"https://www.courtlistener.com/opinion/{cluster_id}/{cluster.get('slug', '')}/"
+            # Build the opinion page URL
+            cluster_id = result.get("cluster_id", "") or result.get("id", "")
+            slug = result.get("slug", "") or case_name.lower().replace(" ", "-")[:50]
+            absolute_url = result.get("absolute_url", "")
+            if absolute_url:
+                page_url = f"https://www.courtlistener.com{absolute_url}"
+            elif cluster_id:
+                page_url = f"https://www.courtlistener.com/opinion/{cluster_id}/{slug}/"
+            else:
+                page_url = ""
 
-            # Try to get the opinion text from sub-opinions
-            text_content = ""
-            pdf_url = ""
-            sub_opinions = cluster.get("sub_opinions", [])
+            # Get download URL if available
+            pdf_url = result.get("download_url", "") or ""
+            if pdf_url and not pdf_url.startswith("http"):
+                pdf_url = f"https://www.courtlistener.com{pdf_url}"
 
-            # If sub_opinions is a list of URLs, we'll fetch the first one
-            if sub_opinions and isinstance(sub_opinions[0], str):
-                # These are URLs to individual opinion endpoints
-                opinion_url = sub_opinions[0]
-                text_content, pdf_url = self._fetch_opinion_text(opinion_url)
-            elif sub_opinions and isinstance(sub_opinions[0], dict):
-                # Sometimes inline data
-                first_op = sub_opinions[0]
-                text_content = (
-                    first_op.get("plain_text", "")
-                    or first_op.get("html", "")
-                    or first_op.get("html_lawbox", "")
-                    or first_op.get("html_columbia", "")
-                    or ""
-                )
-                if first_op.get("download_url"):
-                    pdf_url = first_op["download_url"]
+            # Get snippet/text if available
+            text_content = result.get("snippet", "") or result.get("text", "") or ""
 
-            # Determine opinion type from precedential_status
+            # Build citation string
+            citation_str = ""
+            if isinstance(citation, list) and citation:
+                citation_str = citation[0] if isinstance(citation[0], str) else str(citation[0])
+            elif isinstance(citation, str):
+                citation_str = citation
+
+            # Opinion type
             opinion_type = ""
-            if precedential_status:
+            if status:
                 status_map = {
                     "Published": "Written Opinion",
                     "Unpublished": "Unpublished",
@@ -181,16 +192,7 @@ class CourtListenerScraper:
                     "Relating-to": "Relating-to",
                     "Unknown": "",
                 }
-                opinion_type = status_map.get(precedential_status, precedential_status)
-
-            # Build citation string
-            citations = cluster.get("citations", [])
-            citation = ""
-            if citations:
-                if isinstance(citations[0], dict):
-                    citation = citations[0].get("cite", "")
-                elif isinstance(citations[0], str):
-                    citation = citations[0]
+                opinion_type = status_map.get(status, status)
 
             return Opinion(
                 case_number=docket_number,
@@ -203,11 +205,11 @@ class CourtListenerScraper:
                 page_url=page_url,
                 text_content=text_content[:15000] if text_content else "",
                 docket_number=docket_number,
-                citation=citation,
+                citation=citation_str,
                 judges=judges,
             )
         except Exception as e:
-            logger.debug(f"Error parsing cluster: {e}")
+            logger.debug(f"Error parsing search result: {e}")
             return None
 
     def _fetch_opinion_text(self, opinion_url: str) -> tuple[str, str]:
