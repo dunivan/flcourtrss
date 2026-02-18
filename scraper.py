@@ -16,7 +16,7 @@ from typing import Optional
 
 import requests
 
-from config import COURTS, COURTLISTENER_API_BASE, USER_AGENT, LOOKBACK_DAYS
+from config import COURTS, COURTLISTENER_API_BASE, USER_AGENT, LOOKBACK_DAYS, DCA_PREFIX_MAP
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -128,6 +128,16 @@ class CourtListenerScraper:
 
         return opinions
 
+    @staticmethod
+    def _resolve_court(docket_number: str, default_court_id: str, default_config: dict) -> tuple[str, str]:
+        """Determine actual court from docket number prefix (e.g., '1D24-1234' -> 1st DCA)."""
+        docket = docket_number.strip().upper()
+        for prefix, (full_name, short_name) in DCA_PREFIX_MAP.items():
+            if docket.startswith(prefix):
+                return full_name, prefix.lower()
+        # Fallback to the config-provided court info
+        return default_config["name"], default_court_id
+
     def _parse_search_result(self, result: dict, court_id: str, config: dict) -> Optional[Opinion]:
         """Parse a CourtListener search result into an Opinion."""
         try:
@@ -144,6 +154,9 @@ class CourtListenerScraper:
             judges = result.get("judge", "") or result.get("judges", "") or ""
             citation = result.get("citation", [])
             status = result.get("status", "") or result.get("precedentialStatus", "") or ""
+
+            # Resolve the actual court from docket number prefix
+            actual_court_name, actual_court_id = self._resolve_court(docket_number, court_id, config)
 
             # Parse date
             date = datetime.now()
@@ -197,8 +210,8 @@ class CourtListenerScraper:
             return Opinion(
                 case_number=docket_number,
                 case_name=case_name,
-                court_id=court_id,
-                court_name=config["name"],
+                court_id=actual_court_id,
+                court_name=actual_court_name,
                 date=date,
                 opinion_type=opinion_type,
                 pdf_url=pdf_url,
