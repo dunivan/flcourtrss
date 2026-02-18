@@ -7,42 +7,31 @@ Uses CourtListener API as the data source.
 COURTLISTENER_API_BASE = "https://www.courtlistener.com/api/rest/v4"
 
 # CourtListener court IDs for Florida appellate courts
+# Note: "fladistctapp" is a catch-all that returns opinions from ALL DCAs.
+# Individual DCA IDs (fladistctapp1-5) return 0 results on the search endpoint,
+# so we use the catch-all and parse the case number prefix to determine the actual court.
 COURTS = {
     "fla": {
         "name": "Supreme Court of Florida",
         "short_name": "FLSC",
         "cl_id": "fla",
     },
-    "fladistctapp1": {
-        "name": "First District Court of Appeal",
-        "short_name": "1st DCA",
-        "cl_id": "fladistctapp1",
-    },
-    "fladistctapp2": {
-        "name": "Second District Court of Appeal",
-        "short_name": "2nd DCA",
-        "cl_id": "fladistctapp2",
-    },
-    "fladistctapp3": {
-        "name": "Third District Court of Appeal",
-        "short_name": "3rd DCA",
-        "cl_id": "fladistctapp3",
-    },
-    "fladistctapp4": {
-        "name": "Fourth District Court of Appeal",
-        "short_name": "4th DCA",
-        "cl_id": "fladistctapp4",
-    },
-    "fladistctapp5": {
-        "name": "Fifth District Court of Appeal",
-        "short_name": "5th DCA",
-        "cl_id": "fladistctapp5",
-    },
     "fladistctapp": {
-        "name": "Sixth District Court of Appeal",
-        "short_name": "6th DCA",
+        "name": "District Courts of Appeal",
+        "short_name": "DCA",
         "cl_id": "fladistctapp",
     },
+}
+
+# Mapping from case number prefix to actual court name/short name
+DCA_PREFIX_MAP = {
+    "1D": ("First District Court of Appeal", "1st DCA"),
+    "2D": ("Second District Court of Appeal", "2nd DCA"),
+    "3D": ("Third District Court of Appeal", "3rd DCA"),
+    "4D": ("Fourth District Court of Appeal", "4th DCA"),
+    "5D": ("Fifth District Court of Appeal", "5th DCA"),
+    "6D": ("Sixth District Court of Appeal", "6th DCA"),
+    "SC": ("Supreme Court of Florida", "FLSC"),
 }
 
 # RSS feed settings
