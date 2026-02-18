@@ -33,10 +33,7 @@ jobs:
           cache: 'pip'
 
       - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
-          playwright install chromium
-          playwright install-deps chromium
+        run: pip install -r requirements.txt
 
       - name: Restore state file
         uses: actions/cache@v4
@@ -49,6 +46,7 @@ jobs:
       - name: Run scraper
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          COURTLISTENER_API_TOKEN: ${{ secrets.COURTLISTENER_API_TOKEN }}
           GITHUB_PAGES_URL: ${{ format('https://{0}.github.io/{1}', github.repository_owner, github.event.repository.name) }}
         run: |
           python main.py \
